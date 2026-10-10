@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS users(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT,
  email TEXT UNIQUE,
+ password_hash TEXT NOT NULL,
  balance REAL DEFAULT 0,
  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -53,6 +54,52 @@ function auth(req,res,next){
 }
 
 app.get("/api/health",(req,res)=>res.json({ok:true}));
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body || {};
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        error: "Name, email and password are required"
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: "Password must be at least 8 characters"
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const exists = db.prepare(
+      "SELECT id FROM users WHERE email = ?"
+    ).get(normalizedEmail);
+
+    if (exists) {
+      return res.status(409).json({
+        error: "Email already registered"
+      });
+    }
+
+    const passwordHash = bcrypt.hashSync(password, 12);
+
+    const result = db.prepare(
+      "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)"
+    ).run(name.trim(), normalizedEmail, passwordHash);
+
+    return res.status(201).json({
+      ok: true,
+      message: "Registration successful",
+      userId: result.lastInsertRowid
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: "Registration failed"
+    });
+  }
+});
 
 // First-admin setup. Protect this with SETUP_KEY and disable it after first admin exists.
 app.post("/api/admin/setup",(req,res)=>{
