@@ -161,4 +161,49 @@ app.patch("/api/admin/withdrawals/:id",auth,(req,res)=>{
  res.json({ok:true});
 });
 
+app.post("/api/user/login", (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+
+    if (!email || !password) {
+      return res.status(400).json({
+        error: "Email and password are required"
+      });
+    }
+
+    const user = db.prepare(
+      "SELECT * FROM users WHERE email = ?"
+    ).get(email.trim().toLowerCase());
+
+    if (!user || !user.password_hash ||
+        !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({
+        error: "ইমেইল অথবা পাসওয়ার্ড ভুল"
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: "user" },
+      JWT_SECRET,
+      { expiresIn: "12h" }
+    );
+
+    return res.json({
+      ok: true,
+      message: "Login সফল হয়েছে",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        balance: user.balance
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: "Login করতে সমস্যা হয়েছে"
+    });
+  }
+});
 app.listen(PORT,()=>console.log(`S7 Pay backend running on port ${PORT}`));
