@@ -248,4 +248,77 @@ app.get("/api/user/balance", userAuth, (req, res) => {
     });
   }
 });
+// USER TASKS
+app.get("/api/user/tasks", userAuth, (req, res) => {
+  try {
+    const tasks = db.prepare(
+      "SELECT id, title, description, reward FROM tasks WHERE active = 1 ORDER BY id DESC"
+    ).all();
+
+    res.json({ ok: true, tasks });
+  } catch (error) {
+    res.status(500).json({ error: "Tasks লোড করা যায়নি" });
+  }
+});
+
+// USER WALLET
+app.get("/api/user/wallet", userAuth, (req, res) => {
+  try {
+    const user = db.prepare(
+      "SELECT id, balance FROM users WHERE id = ?"
+    ).get(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const withdrawals = db.prepare(
+      "SELECT id, amount, status, created_at FROM withdrawals WHERE user_id = ? ORDER BY id DESC"
+    ).all(req.user.id);
+
+    res.json({
+      ok: true,
+      balance: user.balance,
+      withdrawals
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Wallet লোড করা যায়নি" });
+  }
+});
+
+// SUBMIT WITHDRAWAL REQUEST
+app.post("/api/user/withdraw", userAuth, (req, res) => {
+  try {
+    const amount = Number(req.body?.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: "সঠিক Amount দিন" });
+    }
+
+    const user = db.prepare(
+      "SELECT balance FROM users WHERE id = ?"
+    ).get(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (amount > user.balance) {
+      return res.status(400).json({ error: "পর্যাপ্ত Balance নেই" });
+    }
+
+    const result = db.prepare(
+      "INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, 'pending')"
+    ).run(req.user.id, amount);
+
+    res.status(201).json({
+      ok: true,
+      message: "Withdraw আবেদন জমা হয়েছে",
+      withdrawalId: result.lastInsertRowid,
+      status: "pending"
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Withdraw আবেদন করা যায়নি" });
+  }
+});
 app.listen(PORT,()=>console.log(`S7 Pay backend running on port ${PORT}`));
