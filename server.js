@@ -160,7 +160,28 @@ app.patch("/api/admin/withdrawals/:id",auth,(req,res)=>{
  if(!r.changes)return res.status(404).json({error:"Withdrawal not found"});
  res.json({ok:true});
 });
+function userAuth(req, res, next) {
+  const h = req.headers.authorization || "";
 
+  if (!h.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const decoded = jwt.verify(h.slice(7), JWT_SECRET);
+
+    if (decoded.role !== "user") {
+      return res.status(403).json({ error: "User access only" });
+    }
+
+    req.user = decoded;
+    next();
+  } catch (e) {
+    return res.status(401).json({
+      error: "Invalid or expired token"
+    });
+  }
+}
 app.post("/api/user/login", (req, res) => {
   try {
     const { email, password } = req.body || {};
