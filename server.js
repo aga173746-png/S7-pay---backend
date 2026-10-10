@@ -227,4 +227,25 @@ app.post("/api/user/login", (req, res) => {
     });
   }
 });
+app.get("/api/user/balance", userAuth, (req, res) => {
+  try {
+    const user = db.prepare(
+      "SELECT id, name, email, balance FROM users WHERE id = ?"
+    ).get(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.json({
+      ok: true,
+      balance: user.balance
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: "Balance দেখাতে সমস্যা হয়েছে"
+    });
+  }
+});
 app.listen(PORT,()=>console.log(`S7 Pay backend running on port ${PORT}`));
