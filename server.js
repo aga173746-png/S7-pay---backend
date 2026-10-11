@@ -58,6 +58,49 @@ function auth(req,res,next){
 }
 
 app.get("/api/health",(req,res)=>res.json({ok:true}));
+app.get("/api/payment-settings",(req,res)=>{
+  const rows=db.prepare(
+    "SELECT key,value FROM app_settings WHERE key IN ('bkash_number','payment_amount','payment_instructions')"
+  ).all();
+
+  const settings={
+    bkash_number:"",
+    payment_amount:"",
+    payment_instructions:""
+  };
+
+  for(const row of rows) settings[row.key]=row.value;
+
+  res.json({ok:true,settings});
+});
+
+app.put("/api/admin/payment-settings",auth,(req,res)=>{
+  const {bkash_number="",payment_amount="",payment_instructions=""}=req.body||{};
+  const number=String(bkash_number).trim();
+  const amount=String(payment_amount).trim();
+  const instructions=String(payment_instructions).trim();
+
+  if(number && !/^01[3-9]\d{8}$/.test(number)){
+    return res.status(400).json({error:"সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন"});
+  }
+
+  if(amount && (!Number.isFinite(Number(amount)) || Number(amount)<=0)){
+    return res.status(400).json({error:"সঠিক Payment Amount দিন"});
+  }
+
+  const put=db.prepare(
+    "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  );
+
+  const tx=db.transaction(()=>{
+    put.run("bkash_number",number);
+    put.run("payment_amount",amount);
+    put.run("payment_instructions",instructions);
+  });
+
+  tx();
+  res.json({ok:true,message:"bKash settings saved"});
+});
 app.post("/api/register", async (req, res) => {
   try {
     const { name, email, password } = req.body || {};
