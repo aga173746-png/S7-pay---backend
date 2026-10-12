@@ -60,46 +60,71 @@ function auth(req,res,next){
 app.get("/api/health",(req,res)=>res.json({ok:true}));
 app.get("/api/payment-settings",(req,res)=>{
   const rows=db.prepare(
-    "SELECT key,value FROM app_settings WHERE key IN ('bkash_number','payment_amount','payment_instructions')"
-  ).all();
+    "SELECT key,value FROM app_settings WHERE key IN ('bkash_number','payment_amount','payment_instructions','reward_amount')"
+).all();
 
   const settings={
     bkash_number:"",
     payment_amount:"",
-    payment_instructions:""
-  };
+    payment_instructions:"",
+    reward_amount:""
+};
 
   for(const row of rows) settings[row.key]=row.value;
 
   res.json({ok:true,settings});
 });
 
-app.put("/api/admin/payment-settings",auth,(req,res)=>{
-  const {bkash_number="",payment_amount="",payment_instructions=""}=req.body||{};
-  const number=String(bkash_number).trim();
-  const amount=String(payment_amount).trim();
-  const instructions=String(payment_instructions).trim();
+app.put("/api/admin/payment-settings", auth, (req, res) => {
+  const {
+    bkash_number = "",
+    payment_amount = "",
+    payment_instructions = "",
+    reward_amount = ""
+  } = req.body || {};
 
-  if(number && !/^01[3-9]\d{8}$/.test(number)){
-    return res.status(400).json({error:"সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন"});
+  const number = String(bkash_number).trim();
+  const amount = String(payment_amount).trim();
+  const instructions = String(payment_instructions).trim();
+  const reward = String(reward_amount).trim();
+
+  if (number && !/^01[3-9]\d{8}$/.test(number)) {
+    return res.status(400).json({
+      error: "সঠিক ১১ সংখ্যার বাংলাদেশি মোবাইল নম্বর দিন"
+    });
   }
 
-  if(amount && (!Number.isFinite(Number(amount)) || Number(amount)<=0)){
-    return res.status(400).json({error:"সঠিক Payment Amount দিন"});
+  if (!amount || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+    return res.status(400).json({
+      error: "সঠিক Payment Amount দিন"
+    });
   }
 
-  const put=db.prepare(
-    "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-  );
+  if (!reward || !Number.isFinite(Number(reward)) || Number(reward) <= 0) {
+    return res.status(400).json({
+      error: "সঠিক Reward Amount দিন"
+    });
+  }
 
-  const tx=db.transaction(()=>{
-    put.run("bkash_number",number);
-    put.run("payment_amount",amount);
-    put.run("payment_instructions",instructions);
+  const put = db.prepare(`
+    INSERT INTO app_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+
+  const saveSettings = db.transaction(() => {
+    put.run("bkash_number", number);
+    put.run("payment_amount", amount);
+    put.run("payment_instructions", instructions);
+    put.run("reward_amount", reward);
   });
 
-  tx();
-  res.json({ok:true,message:"bKash settings saved"});
+  saveSettings();
+
+  res.json({
+    ok: true,
+    message: "bKash settings and reward saved"
+  });
 });
 app.post("/api/register", async (req, res) => {
   try {
@@ -368,4 +393,255 @@ app.post("/api/user/withdraw", userAuth, (req, res) => {
     res.status(500).json({ error: "Withdraw আবেদন করা যায়নি" });
   }
 });
+ // ===== S7 PAY DEPOSIT SYSTEM =====
+
+// Create deposits table
+db.exec(`
+CREATE TABLE IF NOT EXISTS deposits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  sender_bkash TEXT NOT NULL,
+  amount REAL NOT NULL,
+  transaction_id TEXT NOT NULL UNIQUE,
+  reward REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+`);
+
+// Verify admin token and admin account
+function depositAdminAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+
+  if (!header.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Admin login required" });
+  }
+
+  try {
+    const decoded = jwt.verify(header.slice(7), JWT_SECRET);
+
+    const admin = db.prepare(
+      "SELECT id, email FROM admins WHERE id = ? AND email = ?"
+    ).get(decoded.id, decoded.email);
+
+    if (!admin) {
+      return res.status(403).json({ error: "Admin access only" });
+    }
+
+    req.depositAdmin = admin;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+
+// User submits a deposit request
+app.post("/api/user/deposit", userAuth, (req, res) => {
+  try {
+    const senderBkash = String(req.body?.sender_bkash || "").trim();
+    const transactionId = String(req.body?.transaction_id || "")
+      .trim()
+      .toUpperCase();
+    const amount = Number(req.body?.amount);
+
+    if (!/^01[3-9]\d{8}$/.test(senderBkash)) {
+      return res.status(400).json({
+        error: "সঠিক ১১ সংখ্যার Sender bKash নম্বর দিন"
+      });
+    }
+
+    if (!transactionId || transactionId.length > 100) {
+      return res.status(400).json({
+        error: "সঠিক Transaction ID দিন"
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        error: "সঠিক Amount দিন"
+      });
+    }
+
+    const settingsRows = db.prepare(
+      "SELECT key, value FROM app_settings WHERE key IN ('payment_amount', 'reward_amount')"
+    ).all();
+
+    const settings = {};
+    for (const row of settingsRows) {
+      settings[row.key] = row.value;
+    }
+
+    const requiredAmount = Number(settings.payment_amount);
+    const rewardAmount = Number(settings.reward_amount);
+
+    if (
+      !Number.isFinite(requiredAmount) ||
+      requiredAmount <= 0 ||
+      !Number.isFinite(rewardAmount) ||
+      rewardAmount <= 0
+    ) {
+      return res.status(400).json({
+        error: "Admin এখনো Payment Amount ও Reward সেট করেননি"
+      });
+    }
+
+    if (amount !== requiredAmount) {
+      return res.status(400).json({
+        error: `সঠিক Payment Amount হলো ${requiredAmount}`
+      });
+    }
+
+    const result = db.prepare(`
+      INSERT INTO deposits
+        (user_id, sender_bkash, amount, transaction_id, reward, status)
+      VALUES (?, ?, ?, ?, ?, 'pending')
+    `).run(
+      req.user.id,
+      senderBkash,
+      amount,
+      transactionId,
+      rewardAmount
+    );
+
+    return res.status(201).json({
+      ok: true,
+      message: "Deposit আবেদন জমা হয়েছে। Admin যাচাই করবেন।",
+      depositId: result.lastInsertRowid,
+      status: "pending"
+    });
+  } catch (error) {
+    if (String(error.code || "").includes("CONSTRAINT")) {
+      return res.status(409).json({
+        error: "এই Transaction ID আগে জমা দেওয়া হয়েছে"
+      });
+    }
+
+    console.error("Deposit submission error:", error);
+    return res.status(500).json({
+      error: "Deposit আবেদন জমা দেওয়া যায়নি"
+    });
+  }
+});
+
+// User views their own deposit requests
+app.get("/api/user/deposits", userAuth, (req, res) => {
+  try {
+    const deposits = db.prepare(`
+      SELECT id, sender_bkash, amount, transaction_id,
+             reward, status, created_at
+      FROM deposits
+      WHERE user_id = ?
+      ORDER BY id DESC
+    `).all(req.user.id);
+
+    return res.json({ ok: true, deposits });
+  } catch (error) {
+    console.error("User deposits error:", error);
+    return res.status(500).json({
+      error: "Deposit history লোড করা যায়নি"
+    });
+  }
+});
+
+// Admin views all deposit requests
+app.get("/api/admin/deposits", depositAdminAuth, (req, res) => {
+  try {
+    const deposits = db.prepare(`
+      SELECT
+        d.id,
+        d.user_id,
+        u.name AS user_name,
+        u.email AS user_email,
+        d.sender_bkash,
+        d.amount,
+        d.transaction_id,
+        d.reward,
+        d.status,
+        d.created_at
+      FROM deposits d
+      JOIN users u ON u.id = d.user_id
+      ORDER BY d.id DESC
+    `).all();
+
+    return res.json({ ok: true, deposits });
+  } catch (error) {
+    console.error("Admin deposits error:", error);
+    return res.status(500).json({
+      error: "Deposit requests লোড করা যায়নি"
+    });
+  }
+});
+
+// Admin approves or rejects a deposit request
+app.patch("/api/admin/deposits/:id", depositAdminAuth, (req, res) => {
+  const id = Number(req.params.id);
+  const status = String(req.body?.status || "");
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return res.status(400).json({ error: "Invalid deposit ID" });
+  }
+
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(400).json({
+      error: "Status approved অথবা rejected হতে হবে"
+    });
+  }
+
+  try {
+    const processDeposit = db.transaction(() => {
+      const deposit = db.prepare(
+        "SELECT * FROM deposits WHERE id = ?"
+      ).get(id);
+
+      if (!deposit) {
+        return { error: "Deposit request পাওয়া যায়নি", code: 404 };
+      }
+
+      if (deposit.status !== "pending") {
+        return {
+          error: "এই আবেদন আগেই প্রক্রিয়া করা হয়েছে",
+          code: 409
+        };
+      }
+
+      if (status === "approved") {
+        // Credit reward only while the request is pending.
+        const credit = db.prepare(
+          "UPDATE users SET balance = balance + ? WHERE id = ?"
+        ).run(deposit.reward, deposit.user_id);
+
+        if (!credit.changes) {
+          throw new Error("Deposit user not found");
+        }
+      }
+
+      db.prepare(
+        "UPDATE deposits SET status = ? WHERE id = ? AND status = 'pending'"
+      ).run(status, id);
+
+      return { ok: true, status };
+    });
+
+    const result = processDeposit();
+
+    if (result.error) {
+      return res.status(result.code).json({ error: result.error });
+    }
+
+    return res.json({
+      ok: true,
+      message: status === "approved"
+        ? "Deposit approved and reward credited"
+        : "Deposit rejected",
+      status: result.status
+    });
+  } catch (error) {
+    console.error("Deposit processing error:", error);
+    return res.status(500).json({
+      error: "Deposit request প্রক্রিয়া করা যায়নি"
+    });
+  }
+});
+
+// ===== END S7 PAY DEPOSIT SYSTEM =====
 app.listen(PORT,()=>console.log(`S7 Pay backend running on port ${PORT}`));
